@@ -20,7 +20,7 @@ import type { ServerGeminiStreamEvent, ChatCompressionInfo } from './turn.js';
 import { CompressionStatus } from './turn.js';
 import { Turn, GeminiEventType } from './turn.js';
 import type { Config } from '../config/config.js';
-import { getCoreSystemPrompt } from './prompts.js';
+import { getCoreSystemPrompt, getPromptEnv } from './prompts.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { reportError } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
@@ -302,7 +302,11 @@ export class GeminiClient {
     const systemMemory = this.config.isJitContextEnabled()
       ? this.config.getGlobalMemory()
       : this.config.getUserMemory();
-    const systemInstruction = getCoreSystemPrompt(this.config, systemMemory);
+    const systemInstruction = getCoreSystemPrompt(
+      this.config,
+      getPromptEnv(this.config),
+      systemMemory,
+    );
     this.getChat().setSystemInstruction(systemInstruction);
   }
 
@@ -323,7 +327,11 @@ export class GeminiClient {
       const systemMemory = this.config.isJitContextEnabled()
         ? this.config.getGlobalMemory()
         : this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(this.config, systemMemory);
+      const systemInstruction = getCoreSystemPrompt(
+        this.config,
+        getPromptEnv(this.config),
+        systemMemory,
+      );
       return new GeminiChat(
         this.config,
         systemInstruction,
@@ -872,7 +880,11 @@ export class GeminiClient {
 
     try {
       const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(this.config, userMemory);
+      const systemInstruction = getCoreSystemPrompt(
+        this.config,
+        getPromptEnv(this.config),
+        userMemory,
+      );
       const {
         model,
         config: newConfig,
