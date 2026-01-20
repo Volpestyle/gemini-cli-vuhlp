@@ -135,6 +135,7 @@ export type ServerGeminiContentEvent = {
 export type ServerGeminiThoughtEvent = {
   type: GeminiEventType.Thought;
   value: ThoughtSummary;
+  rawText?: string;
   traceId?: string;
 };
 
@@ -293,10 +294,12 @@ export class Turn {
         const parts = resp.candidates?.[0]?.content?.parts ?? [];
         for (const part of parts) {
           if (part.thought) {
-            const thought = parseThought(part.text ?? '');
+            const rawText = part.text ?? '';
+            const thought = parseThought(rawText);
             yield {
               type: GeminiEventType.Thought,
               value: thought,
+              rawText,
               traceId,
             };
           }

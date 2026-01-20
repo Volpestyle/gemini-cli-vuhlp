@@ -26,6 +26,7 @@ import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
+import { resolveApproval, cancelAllApprovals } from './approvalManager.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
@@ -795,7 +796,8 @@ export function initializeOutputListenersAndFlush() {
 
 type StreamJsonInput =
   | { type: 'message'; role: 'user'; content: string; turn_id?: string }
-  | { type: 'session.end'; reason?: string };
+  | { type: 'session.end'; reason?: string }
+  | { type: 'approval.resolved'; approvalId: string; resolution: { status: 'approved' | 'denied' } };
 
 function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
   let parsed: object | null = null;
@@ -817,6 +819,8 @@ function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
     content?: string;
     turn_id?: string;
     reason?: string;
+    approvalId?: string;
+    resolution?: { status?: string };
   };
 
   if (record.type === 'session.end') {
@@ -827,6 +831,21 @@ function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
       end.reason = record.reason;
     }
     return end;
+  }
+
+  if (record.type === 'approval.resolved') {
+    if (
+      typeof record.approvalId !== 'string' ||
+      !record.resolution ||
+      (record.resolution.status !== 'approved' && record.resolution.status !== 'denied')
+    ) {
+      return null;
+    }
+    return {
+      type: 'approval.resolved',
+      approvalId: record.approvalId,
+      resolution: { status: record.resolution.status },
+    };
   }
 
   if (
@@ -903,10 +922,20 @@ async function runStreamJsonInputLoop({
       if (parsed.reason) {
         writeToStderr(`Session ended: ${parsed.reason}\n`);
       }
+      cancelAllApprovals();
       reader.close();
       break;
     }
 
+    if (parsed.type === 'approval.resolved') {
+      const resolved = resolveApproval(parsed.approvalId, parsed.resolution);
+      if (!resolved) {
+        writeToStderr(`Warning: No pending approval found for ${parsed.approvalId}\n`);
+      }
+      continue;
+    }
+
+    // At this point, parsed must be a message type
     let input = parsed.content;
     if (pendingContext) {
       input = `${pendingContext}\n\n${input}`;
@@ -935,7 +964,15 @@ async function runStreamJsonInputLoop({
       input,
       prompt_id,
       resumedSessionData: pendingResume,
+      requireToolApproval: true,
     });
+    // Emit message_stop to signal turn completion
+    if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+      console.log(JSON.stringify({
+        type: 'message_stop',
+        timestamp: new Date().toISOString(),
+      }));
+    }
     pendingResume = undefined;
   }
 }

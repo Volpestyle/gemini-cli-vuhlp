@@ -71,6 +71,7 @@ export interface CliArgs {
   approvalMode: string | undefined;
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
+  coreTools: string[] | undefined;
   experimentalAcp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -171,6 +172,17 @@ export async function parseArguments(
           coerce: (tools: string[]) =>
             // Handle comma-separated values
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+        })
+        .option('core-tools', {
+          type: 'array',
+          string: true,
+          nargs: 1,
+          description:
+            'Core tools to enable (use "none" to disable all core tools)',
+          coerce: (tools: string[]) =>
+            tools
+              .flatMap((tool) => tool.split(',').map((t) => t.trim()))
+              .filter((tool) => tool.length > 0),
         })
         .option('extensions', {
           alias: 'e',
@@ -302,6 +314,14 @@ export async function parseArguments(
         !['text', 'stream-json'].includes(argv['inputFormat'] as string)
       ) {
         return `Invalid values:\n  Argument: input-format, Given: "${argv['inputFormat']}", Choices: "text", "stream-json"`;
+      }
+      const coreTools = argv['coreTools'];
+      if (
+        Array.isArray(coreTools) &&
+        coreTools.includes('none') &&
+        coreTools.length > 1
+      ) {
+        return 'Cannot combine "none" with other --core-tools entries';
       }
       return true;
     });
@@ -665,6 +685,11 @@ export async function loadCliConfig(
     argv.screenReader !== undefined
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
+  const coreToolsOverride = argv.coreTools;
+  const resolvedCoreTools =
+    coreToolsOverride && coreToolsOverride.includes('none')
+      ? []
+      : coreToolsOverride;
 
   const ptyInfo = await getPty();
 
@@ -684,7 +709,7 @@ export async function loadCliConfig(
     question,
     previewFeatures: settings.general?.previewFeatures,
 
-    coreTools: settings.tools?.core || undefined,
+    coreTools: resolvedCoreTools ?? settings.tools?.core,
     allowedTools: allowedTools.length > 0 ? allowedTools : undefined,
     policyEngineConfig,
     excludeTools,
