@@ -81,6 +81,7 @@ export interface CliArgs {
   screenReader: boolean | undefined;
   useWriteTodos: boolean | undefined;
   outputFormat: string | undefined;
+  inputFormat: string | undefined;
   fakeResponses: string | undefined;
   recordResponses: string | undefined;
 }
@@ -239,6 +240,12 @@ export async function parseArguments(
           description: 'The format of the CLI output.',
           choices: ['text', 'json', 'stream-json'],
         })
+        .option('input-format', {
+          type: 'string',
+          nargs: 1,
+          description: 'The format of stdin input.',
+          choices: ['text', 'stream-json'],
+        })
         .option('fake-responses', {
           type: 'string',
           description: 'Path to a file with fake model responses for testing.',
@@ -271,6 +278,14 @@ export async function parseArguments(
       if (argv['prompt'] && argv['promptInteractive']) {
         return 'Cannot use both --prompt (-p) and --prompt-interactive (-i) together';
       }
+      if (argv['inputFormat'] === 'stream-json') {
+        if (argv['prompt'] || hasPositionalQuery) {
+          return 'Cannot use --input-format stream-json with --prompt or positional input';
+        }
+        if (argv['promptInteractive']) {
+          return 'Cannot use --input-format stream-json with --prompt-interactive';
+        }
+      }
       if (argv['yolo'] && argv['approvalMode']) {
         return 'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.';
       }
@@ -281,6 +296,12 @@ export async function parseArguments(
         )
       ) {
         return `Invalid values:\n  Argument: output-format, Given: "${argv['outputFormat']}", Choices: "text", "json", "stream-json"`;
+      }
+      if (
+        argv['inputFormat'] &&
+        !['text', 'stream-json'].includes(argv['inputFormat'] as string)
+      ) {
+        return `Invalid values:\n  Argument: input-format, Given: "${argv['inputFormat']}", Choices: "text", "stream-json"`;
       }
       return true;
     });

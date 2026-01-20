@@ -14,6 +14,7 @@ import { basename } from 'node:path';
 import v8 from 'node:v8';
 import os from 'node:os';
 import dns from 'node:dns';
+import readline from 'node:readline';
 import { start_sandbox } from './utils/sandbox.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
@@ -40,10 +41,13 @@ import {
   type UserFeedbackPayload,
   sessionId,
   logUserPrompt,
+  OutputFormat,
   AuthType,
   getOauthClient,
   UserPromptEvent,
   debugLogger,
+  StreamJsonFormatter,
+  JsonStreamEventType,
   recordSlowRender,
   coreEvents,
   CoreEvent,
@@ -632,11 +636,12 @@ export async function main() {
 
     await config.initialize();
     startupProfiler.flush(config);
+    const streamJsonInput = argv.inputFormat === 'stream-json';
 
     // If not a TTY, read from stdin
     // This is for cases where the user pipes input directly into the command
     let stdinData: string | undefined = undefined;
-    if (!process.stdin.isTTY) {
+    if (!process.stdin.isTTY && !streamJsonInput) {
       stdinData = await readStdin();
       if (stdinData) {
         input = input ? `${stdinData}\n\n${input}` : stdinData;
@@ -650,6 +655,7 @@ export async function main() {
       : SessionStartSource.Startup;
 
     const hookSystem = config?.getHookSystem();
+    let sessionStartContext: string | undefined = undefined;
     if (hookSystem) {
       const result = await hookSystem.fireSessionStartEvent(sessionStartSource);
 
@@ -659,10 +665,14 @@ export async function main() {
         }
         const additionalContext = result.getAdditionalContext();
         if (additionalContext) {
-          // Prepend context to input (System Context -> Stdin -> Question)
-          input = input
-            ? `${additionalContext}\n\n${input}`
-            : additionalContext;
+          if (streamJsonInput) {
+            sessionStartContext = additionalContext;
+          } else {
+            // Prepend context to input (System Context -> Stdin -> Question)
+            input = input
+              ? `${additionalContext}\n\n${input}`
+              : additionalContext;
+          }
         }
       }
     }
@@ -672,24 +682,13 @@ export async function main() {
       await config.getHookSystem()?.fireSessionEndEvent(SessionEndReason.Exit);
     });
 
-    if (!input) {
+    if (!streamJsonInput && !input) {
       debugLogger.error(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
       );
       await runExitCleanup();
       process.exit(ExitCodes.FATAL_INPUT_ERROR);
     }
-
-    const prompt_id = Math.random().toString(16).slice(2);
-    logUserPrompt(
-      config,
-      new UserPromptEvent(
-        input.length,
-        prompt_id,
-        config.getContentGeneratorConfig()?.authType,
-        input,
-      ),
-    );
 
     const authType = await validateNonInteractiveAuth(
       settings.merged.security.auth.selectedType,
@@ -704,6 +703,28 @@ export async function main() {
     }
 
     initializeOutputListenersAndFlush();
+
+    if (streamJsonInput) {
+      await runStreamJsonInputLoop({
+        config,
+        settings,
+        resumedSessionData,
+        sessionStartContext,
+      });
+      await runExitCleanup();
+      process.exit(ExitCodes.SUCCESS);
+    }
+
+    const prompt_id = parsed.turn_id ?? Math.random().toString(16).slice(2);
+    logUserPrompt(
+      config,
+      new UserPromptEvent(
+        input.length,
+        prompt_id,
+        config.getContentGeneratorConfig()?.authType,
+        input,
+      ),
+    );
 
     await runNonInteractive({
       config,
@@ -770,6 +791,153 @@ export function initializeOutputListenersAndFlush() {
     }
   }
   coreEvents.drainBacklogs();
+}
+
+type StreamJsonInput =
+  | { type: 'message'; role: 'user'; content: string; turn_id?: string }
+  | { type: 'session.end'; reason?: string };
+
+function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
+  let parsed: object | null = null;
+  try {
+    const value = JSON.parse(line);
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      parsed = value as object;
+    }
+  } catch {
+    return null;
+  }
+  if (!parsed) {
+    return null;
+  }
+
+  const record = parsed as {
+    type?: string;
+    role?: string;
+    content?: string;
+    turn_id?: string;
+    reason?: string;
+  };
+
+  if (record.type === 'session.end') {
+    const end: { type: 'session.end'; reason?: string } = {
+      type: 'session.end',
+    };
+    if (typeof record.reason === 'string') {
+      end.reason = record.reason;
+    }
+    return end;
+  }
+
+  if (
+    record.type !== 'message' ||
+    record.role !== 'user' ||
+    typeof record.content !== 'string'
+  ) {
+    return null;
+  }
+
+  const message: {
+    type: 'message';
+    role: 'user';
+    content: string;
+    turn_id?: string;
+  } = {
+    type: 'message',
+    role: 'user',
+    content: record.content,
+  };
+  if (typeof record.turn_id === 'string') {
+    message.turn_id = record.turn_id;
+  }
+  return message;
+}
+
+function emitStreamJsonInputError(config: Config, message: string): void {
+  if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+    const formatter = new StreamJsonFormatter();
+    formatter.emitEvent({
+      type: JsonStreamEventType.ERROR,
+      timestamp: new Date().toISOString(),
+      severity: 'error',
+      message,
+    });
+  }
+  writeToStderr(`${message}\n`);
+}
+
+async function runStreamJsonInputLoop({
+  config,
+  settings,
+  resumedSessionData,
+  sessionStartContext,
+}: {
+  config: Config;
+  settings: LoadedSettings;
+  resumedSessionData?: ResumedSessionData;
+  sessionStartContext?: string;
+}): Promise<void> {
+  const reader = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
+  let pendingResume = resumedSessionData;
+  let pendingContext = sessionStartContext;
+
+  for await (const line of reader) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    const parsed = parseStreamJsonInputLine(trimmed);
+    if (!parsed) {
+      const excerpt =
+        trimmed.length > 200 ? `${trimmed.slice(0, 200)}...` : trimmed;
+      emitStreamJsonInputError(
+        config,
+        `Invalid stream-json input line: ${excerpt}`,
+      );
+      continue;
+    }
+    if (parsed.type === 'session.end') {
+      if (parsed.reason) {
+        writeToStderr(`Session ended: ${parsed.reason}\n`);
+      }
+      reader.close();
+      break;
+    }
+
+    let input = parsed.content;
+    if (pendingContext) {
+      input = `${pendingContext}\n\n${input}`;
+      pendingContext = undefined;
+    }
+    if (!input.trim()) {
+      emitStreamJsonInputError(
+        config,
+        'Empty input provided in stream-json message',
+      );
+      continue;
+    }
+    const prompt_id = Math.random().toString(16).slice(2);
+    logUserPrompt(
+      config,
+      new UserPromptEvent(
+        input.length,
+        prompt_id,
+        config.getContentGeneratorConfig()?.authType,
+        input,
+      ),
+    );
+    await runNonInteractive({
+      config,
+      settings,
+      input,
+      prompt_id,
+      resumedSessionData: pendingResume,
+    });
+    pendingResume = undefined;
+  }
 }
 
 function setupAdminControlsListener() {
