@@ -794,10 +794,24 @@ export function initializeOutputListenersAndFlush() {
   coreEvents.drainBacklogs();
 }
 
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+type JsonObject = { [key: string]: JsonValue };
+
 type StreamJsonInput =
   | { type: 'message'; role: 'user'; content: string; turn_id?: string }
   | { type: 'session.end'; reason?: string }
-  | { type: 'approval.resolved'; approvalId: string; resolution: { status: 'approved' | 'denied' } };
+  | {
+      type: 'approval.resolved';
+      approvalId: string;
+      resolution: {
+        status: 'approved' | 'denied' | 'modified';
+        modifiedArgs?: JsonObject;
+      };
+    };
+
+function isJsonObject(value: JsonValue | undefined): value is JsonObject {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
 
 function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
   let parsed: object | null = null;
@@ -820,7 +834,7 @@ function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
     turn_id?: string;
     reason?: string;
     approvalId?: string;
-    resolution?: { status?: string };
+    resolution?: { status?: string; modifiedArgs?: JsonObject };
   };
 
   if (record.type === 'session.end') {
@@ -834,17 +848,25 @@ function parseStreamJsonInputLine(line: string): StreamJsonInput | null {
   }
 
   if (record.type === 'approval.resolved') {
+    const status = record.resolution?.status;
+    const modifiedArgsValue = record.resolution?.modifiedArgs;
+    const hasModifiedArgs = modifiedArgsValue !== undefined;
+    const modifiedArgs = isJsonObject(modifiedArgsValue)
+      ? modifiedArgsValue
+      : undefined;
     if (
       typeof record.approvalId !== 'string' ||
-      !record.resolution ||
-      (record.resolution.status !== 'approved' && record.resolution.status !== 'denied')
+      !status ||
+      (status !== 'approved' && status !== 'denied' && status !== 'modified') ||
+      (hasModifiedArgs && status !== 'modified') ||
+      (status === 'modified' && !modifiedArgs)
     ) {
       return null;
     }
     return {
       type: 'approval.resolved',
       approvalId: record.approvalId,
-      resolution: { status: record.resolution.status },
+      resolution: modifiedArgs ? { status, modifiedArgs } : { status },
     };
   }
 
@@ -902,6 +924,66 @@ async function runStreamJsonInputLoop({
   });
   let pendingResume = resumedSessionData;
   let pendingContext = sessionStartContext;
+  const messageQueue: Array<{
+    input: string;
+    turnId?: string;
+    resume?: ResumedSessionData;
+  }> = [];
+  let processingPromise: Promise<void> | null = null;
+
+  const processQueue = async () => {
+    while (messageQueue.length > 0) {
+      const next = messageQueue.shift();
+      if (!next) {
+        continue;
+      }
+      const promptId = next.turnId ?? Math.random().toString(16).slice(2);
+      logUserPrompt(
+        config,
+        new UserPromptEvent(
+          next.input.length,
+          promptId,
+          config.getContentGeneratorConfig()?.authType,
+          next.input,
+        ),
+      );
+      await runNonInteractive({
+        config,
+        settings,
+        input: next.input,
+        prompt_id: promptId,
+        resumedSessionData: next.resume,
+        requireToolApproval: true,
+      });
+      // Emit message_stop to signal turn completion
+      if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+        writeToStdout(
+          JSON.stringify({
+            type: 'message_stop',
+            timestamp: new Date().toISOString(),
+          }) + '\n',
+        );
+      }
+    }
+  };
+
+  const ensureProcessing = () => {
+    if (processingPromise) {
+      return;
+    }
+    processingPromise = processQueue()
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        debugLogger.error(`Stream-json processing error: ${message}`);
+        emitStreamJsonInputError(
+          config,
+          `Stream-json processing error: ${message}`,
+        );
+      })
+      .finally(() => {
+        processingPromise = null;
+      });
+  };
 
   for await (const line of reader) {
     const trimmed = line.trim();
@@ -930,7 +1012,9 @@ async function runStreamJsonInputLoop({
     if (parsed.type === 'approval.resolved') {
       const resolved = resolveApproval(parsed.approvalId, parsed.resolution);
       if (!resolved) {
-        writeToStderr(`Warning: No pending approval found for ${parsed.approvalId}\n`);
+        writeToStderr(
+          `Warning: No pending approval found for ${parsed.approvalId}\n`,
+        );
       }
       continue;
     }
@@ -948,33 +1032,15 @@ async function runStreamJsonInputLoop({
       );
       continue;
     }
-    const prompt_id = Math.random().toString(16).slice(2);
-    logUserPrompt(
-      config,
-      new UserPromptEvent(
-        input.length,
-        prompt_id,
-        config.getContentGeneratorConfig()?.authType,
-        input,
-      ),
-    );
-    await runNonInteractive({
-      config,
-      settings,
+    messageQueue.push({
       input,
-      prompt_id,
-      resumedSessionData: pendingResume,
-      requireToolApproval: true,
+      turnId: parsed.turn_id,
+      resume: pendingResume,
     });
-    // Emit message_stop to signal turn completion
-    if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
-      console.log(JSON.stringify({
-        type: 'message_stop',
-        timestamp: new Date().toISOString(),
-      }));
-    }
     pendingResume = undefined;
+    ensureProcessing();
   }
+  await (processingPromise ?? Promise.resolve());
 }
 
 function setupAdminControlsListener() {

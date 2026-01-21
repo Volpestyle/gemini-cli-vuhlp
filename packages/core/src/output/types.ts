@@ -31,6 +31,7 @@ export enum JsonStreamEventType {
   MESSAGE = 'message',
   TOOL_USE = 'tool_use',
   TOOL_RESULT = 'tool_result',
+  THOUGHT = 'thought',
   ERROR = 'error',
   RESULT = 'result',
 }
@@ -71,6 +72,13 @@ export interface ToolResultEvent extends BaseJsonStreamEvent {
   };
 }
 
+export interface ThoughtEvent extends BaseJsonStreamEvent {
+  type: JsonStreamEventType.THOUGHT;
+  subject?: string;
+  description?: string;
+  raw_text?: string;
+}
+
 export interface ErrorEvent extends BaseJsonStreamEvent {
   type: JsonStreamEventType.ERROR;
   severity: 'warning' | 'error';
@@ -103,5 +111,6 @@ export type JsonStreamEvent =
   | MessageEvent
   | ToolUseEvent
   | ToolResultEvent
+  | ThoughtEvent
   | ErrorEvent
   | ResultEvent;

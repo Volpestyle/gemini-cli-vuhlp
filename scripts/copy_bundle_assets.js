@@ -17,7 +17,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { copyFileSync, existsSync, mkdirSync, cpSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, cpSync, rmSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
@@ -54,23 +54,32 @@ for (const file of policyFiles) {
 
 console.log(`Copied ${policyFiles.length} policy files to bundle/policies/`);
 
+function copyDirSafe(src, dest, label) {
+  if (!existsSync(src)) {
+    return;
+  }
+  try {
+    if (existsSync(dest)) {
+      rmSync(dest, { recursive: true, force: true });
+      console.log(`Removed existing ${label} at ${dest}`);
+    }
+    cpSync(src, dest, { recursive: true, dereference: true });
+    console.log(`Copied ${label} to ${dest}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to copy ${label}: ${message}`);
+    throw error;
+  }
+}
+
 // 3. Copy Documentation (docs/)
 const docsSrc = join(root, 'docs');
 const docsDest = join(bundleDir, 'docs');
-if (existsSync(docsSrc)) {
-  cpSync(docsSrc, docsDest, { recursive: true, dereference: true });
-  console.log('Copied docs to bundle/docs/');
-}
+copyDirSafe(docsSrc, docsDest, 'docs');
 
 // 4. Copy Built-in Skills (packages/core/src/skills/builtin)
 const builtinSkillsSrc = join(root, 'packages/core/src/skills/builtin');
 const builtinSkillsDest = join(bundleDir, 'builtin');
-if (existsSync(builtinSkillsSrc)) {
-  cpSync(builtinSkillsSrc, builtinSkillsDest, {
-    recursive: true,
-    dereference: true,
-  });
-  console.log('Copied built-in skills to bundle/builtin/');
-}
+copyDirSafe(builtinSkillsSrc, builtinSkillsDest, 'built-in skills');
 
 console.log('Assets copied to bundle/');

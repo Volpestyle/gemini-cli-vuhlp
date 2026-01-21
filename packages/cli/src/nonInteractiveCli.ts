@@ -29,6 +29,7 @@ import {
   createWorkingStdio,
   recordToolCallInteractions,
   ToolErrorType,
+  writeToStdout,
 } from '@google/gemini-cli-core';
 
 import type { Content, Part } from '@google/genai';
@@ -45,10 +46,7 @@ import {
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
 import { TextOutput } from './ui/utils/textOutput.js';
-import {
-  requestApproval,
-  generateApprovalId,
-} from './approvalManager.js';
+import { requestApproval, generateApprovalId } from './approvalManager.js';
 
 interface RunNonInteractiveParams {
   config: Config;
@@ -241,7 +239,7 @@ export async function runNonInteractive({
           query: input,
           config,
           addItem: (_item, _timestamp) => 0,
-          onDebugMessage: () => { },
+          onDebugMessage: () => {},
           messageId: Date.now(),
           signal: abortController.signal,
         });
@@ -307,6 +305,27 @@ export async function runNonInteractive({
                 textOutput.write(event.value);
               }
             }
+          } else if (event.type === GeminiEventType.Thought) {
+            if (streamFormatter) {
+              const rawText = event.rawText?.trim() ?? '';
+              const subject = event.value.subject?.trim() ?? '';
+              const description = event.value.description?.trim() ?? '';
+              const composed = [subject, description]
+                .filter((item) => item.length > 0)
+                .join('\n\n');
+              const thoughtText = rawText || composed;
+              if (thoughtText) {
+                streamFormatter.emitEvent({
+                  type: JsonStreamEventType.THOUGHT,
+                  timestamp: new Date().toISOString(),
+                  subject: subject || undefined,
+                  description: description || undefined,
+                  raw_text: rawText || undefined,
+                });
+              } else {
+                debugLogger.debug('Skipping empty thought event');
+              }
+            }
           } else if (event.type === GeminiEventType.ToolCallRequest) {
             if (streamFormatter) {
               streamFormatter.emitEvent({
@@ -353,17 +372,19 @@ export async function runNonInteractive({
               const modelMetrics = metrics.models[modelName];
               const inputTokens = modelMetrics?.tokens?.input ?? 0;
               const outputTokens = modelMetrics?.tokens?.candidates ?? 0;
-              console.log(JSON.stringify({
-                type: 'telemetry.usage',
-                timestamp: new Date().toISOString(),
-                provider: 'gemini',
-                model: modelName,
-                usage: {
-                  promptTokens: inputTokens,
-                  completionTokens: outputTokens,
-                  totalTokens: inputTokens + outputTokens,
-                },
-              }));
+              writeToStdout(
+                JSON.stringify({
+                  type: 'telemetry.usage',
+                  timestamp: new Date().toISOString(),
+                  provider: 'gemini',
+                  model: modelName,
+                  usage: {
+                    promptTokens: inputTokens,
+                    completionTokens: outputTokens,
+                    totalTokens: inputTokens + outputTokens,
+                  },
+                }) + '\n',
+              );
 
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.RESULT,
@@ -411,16 +432,18 @@ export async function runNonInteractive({
                 approvalId,
                 requestInfo.name,
                 requestInfo.callId,
-                requestInfo.args as Record<string, unknown>,
+                requestInfo.args,
               );
 
               // Emit approval.resolved event for vuhlp protocol
-              console.log(JSON.stringify({
-                type: 'approval.resolved',
-                timestamp: new Date().toISOString(),
-                approvalId,
-                resolution,
-              }));
+              writeToStdout(
+                JSON.stringify({
+                  type: 'approval.resolved',
+                  timestamp: new Date().toISOString(),
+                  approvalId,
+                  resolution,
+                }) + '\n',
+              );
 
               if (resolution.status === 'denied') {
                 // Skip this tool call if denied
@@ -466,9 +489,9 @@ export async function runNonInteractive({
                     : undefined,
                 error: toolResponse.error
                   ? {
-                    type: toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-                    message: toolResponse.error.message,
-                  }
+                      type: toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                      message: toolResponse.error.message,
+                    }
                   : undefined,
               });
             }
@@ -527,17 +550,19 @@ export async function runNonInteractive({
               const modelMetrics2 = metrics.models[modelName2];
               const inputTokens2 = modelMetrics2?.tokens?.input ?? 0;
               const outputTokens2 = modelMetrics2?.tokens?.candidates ?? 0;
-              console.log(JSON.stringify({
-                type: 'telemetry.usage',
-                timestamp: new Date().toISOString(),
-                provider: 'gemini',
-                model: modelName2,
-                usage: {
-                  promptTokens: inputTokens2,
-                  completionTokens: outputTokens2,
-                  totalTokens: inputTokens2 + outputTokens2,
-                },
-              }));
+              writeToStdout(
+                JSON.stringify({
+                  type: 'telemetry.usage',
+                  timestamp: new Date().toISOString(),
+                  provider: 'gemini',
+                  model: modelName2,
+                  usage: {
+                    promptTokens: inputTokens2,
+                    completionTokens: outputTokens2,
+                    totalTokens: inputTokens2 + outputTokens2,
+                  },
+                }) + '\n',
+              );
 
               streamFormatter.emitEvent({
                 type: JsonStreamEventType.RESULT,
@@ -572,17 +597,19 @@ export async function runNonInteractive({
             const modelMetrics3 = metrics.models[modelName3];
             const inputTokens3 = modelMetrics3?.tokens?.input ?? 0;
             const outputTokens3 = modelMetrics3?.tokens?.candidates ?? 0;
-            console.log(JSON.stringify({
-              type: 'telemetry.usage',
-              timestamp: new Date().toISOString(),
-              provider: 'gemini',
-              model: modelName3,
-              usage: {
-                promptTokens: inputTokens3,
-                completionTokens: outputTokens3,
-                totalTokens: inputTokens3 + outputTokens3,
-              },
-            }));
+            writeToStdout(
+              JSON.stringify({
+                type: 'telemetry.usage',
+                timestamp: new Date().toISOString(),
+                provider: 'gemini',
+                model: modelName3,
+                usage: {
+                  promptTokens: inputTokens3,
+                  completionTokens: outputTokens3,
+                  totalTokens: inputTokens3 + outputTokens3,
+                },
+              }) + '\n',
+            );
 
             streamFormatter.emitEvent({
               type: JsonStreamEventType.RESULT,

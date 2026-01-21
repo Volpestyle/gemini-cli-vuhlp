@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { writeToStdout } from '@google/gemini-cli-core';
+
 /**
  * Approval manager for vuhlp stream-json protocol.
  * Coordinates between the input loop (receives approval.resolved) and
@@ -11,7 +13,7 @@
  */
 
 export interface ApprovalResolution {
-  status: 'approved' | 'denied';
+  status: 'approved' | 'denied' | 'modified';
   modifiedArgs?: Record<string, unknown>;
 }
 
@@ -35,16 +37,18 @@ export function requestApproval(
   args: Record<string, unknown>,
 ): Promise<ApprovalResolution> {
   // Emit approval.requested event
-  console.log(JSON.stringify({
-    type: 'approval.requested',
-    timestamp: new Date().toISOString(),
-    approvalId,
-    tool: {
-      id: toolId,
-      name: toolName,
-      args,
-    },
-  }));
+  writeToStdout(
+    JSON.stringify({
+      type: 'approval.requested',
+      timestamp: new Date().toISOString(),
+      approvalId,
+      tool: {
+        id: toolId,
+        name: toolName,
+        args,
+      },
+    }) + '\n',
+  );
 
   return new Promise((resolve, reject) => {
     pendingApprovals.set(approvalId, {
